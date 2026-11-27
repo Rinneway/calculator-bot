@@ -65,7 +65,10 @@ class handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         secret = os.getenv("WEBHOOK_SECRET")
         blob_token = os.getenv("BLOB_READ_WRITE_TOKEN")
-        if not (TOKEN and secret and blob_token):
+        settings = {"BOT_TOKEN": TOKEN, "WEBHOOK_SECRET": secret, "BLOB_READ_WRITE_TOKEN": blob_token}
+        missing = [name for name, value in settings.items() if not value]
+        if missing:
+            logger.warning("Webhook configuration is missing: %s", ", ".join(missing))
             self.respond(503, "Webhook is not configured")
             return
 
@@ -87,8 +90,9 @@ class handler(BaseHTTPRequestHandler):
 
         try:
             asyncio.run(process_update(blob_token, update))
-        except BlobConflict:
-            self.respond(503, "Update in progress")
+        except BlobConflict as exc:
+            logger.warning("Telegram update %d could not save state: %s", update["update_id"], exc)
+            self.respond(503, "State temporarily unavailable")
             return
         except Exception as exc:
             logger.error("Telegram update %d failed (%s)", update["update_id"], type(exc).__name__)

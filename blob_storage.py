@@ -41,12 +41,16 @@ class BlobStore:
         self.auth = {"Authorization": f"Bearer {token}"}
 
     async def load(self) -> tuple[BotDocument, str | None]:
-        # Private Blob reads bypass the CDN so the next message sees the latest dialog state.
-        async with self.session.get(self.url, params={"cache": "0"}, headers=self.auth, allow_redirects=False) as response:
+        # Bypass the CDN and keep the origin ETag suitable for a conditional write.
+        headers = {**self.auth, "Accept-Encoding": "identity"}
+        async with self.session.get(self.url, params={"cache": "0"}, headers=headers, allow_redirects=False) as response:
             if response.status == 404:
                 return BotDocument(dialogs={}, events=[], updates={}, lease_until=0, imported_stats=False), None
             response.raise_for_status()
-            return await response.json(content_type=None), response.headers["ETag"]
+            etag = response.headers["ETag"]
+            if etag.startswith("W/"):
+                raise BlobConflict("Blob read returned a weak ETag")
+            return await response.json(content_type=None), etag
 
     async def save(self, document: BotDocument, etag: str | None) -> str:
         headers = {
@@ -66,7 +70,7 @@ class BlobStore:
             BLOB_API, params={"pathname": self.path}, json=document, headers=headers, allow_redirects=False,
         ) as response:
             if response.status in (409, 412):
-                raise BlobConflict("Blob changed while processing an update")
+                raise BlobConflict(f"Blob write rejected its precondition (HTTP {response.status})")
             response.raise_for_status()
             return (await response.json(content_type=None))["etag"]
 
