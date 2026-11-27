@@ -1,0 +1,9 @@
+.env
+.env.*
+*.db*
+*.sqlite*
+.idea/
+.pytest_cache/
+assets/
+test_*.py
+setup_webhook.py

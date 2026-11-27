@@ -1,3 +1,10 @@
 {
-  "version": 2
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "functions": {
+    "api/telegram.py": {
+      "maxDuration": 45,
+      "excludeFiles": "{assets/**,.idea/**,test_*.py}"
+    }
+  }
 }

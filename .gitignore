@@ -1,7 +1,8 @@
 # Переменные окружения (токены, пароли)
 .env
-.env.local
-.env.production
+.env.*
+!.env.example
+.vercel/
 
 # Python
 __pycache__/
