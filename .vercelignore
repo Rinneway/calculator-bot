@@ -1,5 +1,6 @@
 .env
 .env.*
+stats.json
 *.db*
 *.sqlite*
 .idea/

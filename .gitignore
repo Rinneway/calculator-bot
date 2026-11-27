@@ -65,7 +65,8 @@ htmlcov/
 *.ipr
 *.iws
 
-# Database
+# Local statistics and database backups
+stats.json
 *.db
 *.sqlite
 *.sqlite3

@@ -3,29 +3,52 @@ import hmac
 import json
 import logging
 import os
+from contextlib import suppress
+from copy import deepcopy
 from http.server import BaseHTTPRequestHandler
+from time import time
+
+from aiohttp import ClientSession, ClientTimeout
 
 from aiogram.types import Update
-from psycopg import AsyncConnection
 
 from bot import TOKEN, make_bot, make_dispatcher
-from postgres import PostgresStats, PostgresStorage, claim_update, request_connection
+from blob_storage import BlobConflict, BlobDialogStorage, BlobStore, request_dialogs
+from storage import EventStats
 
 logger = logging.getLogger(__name__)
-dispatcher = make_dispatcher(storage=PostgresStorage())
+dispatcher = make_dispatcher(storage=BlobDialogStorage())
 
 
-async def process_update(dsn: str, update: dict) -> None:
-    async with make_bot() as bot, await AsyncConnection.connect(dsn, connect_timeout=10) as conn:
-        if not await claim_update(conn, bot.id, update["update_id"]):
+async def process_update(blob_token: str, update: dict) -> None:
+    async with make_bot() as bot, ClientSession(timeout=ClientTimeout(total=6)) as session:
+        store = BlobStore(session, blob_token, bot.id)
+        saved, etag = await store.load()
+        now = time()
+        update_id = str(update["update_id"])
+        if saved["updates"].get(update_id, 0) > now - 172800:
             return
+        if saved["lease_until"] > now:
+            raise BlobConflict("A Telegram update is in progress")
 
-        context_token = request_connection.set(conn)
+        # Reserve the document before making Telegram calls. The lease outlasts maxDuration.
+        lease_etag = await store.save({**saved, "lease_until": now + 60}, etag)
+        working = deepcopy(saved)
+        working["lease_until"] = 0
+        working["updates"] = {key: ts for key, ts in saved["updates"].items() if ts > now - 172800}
+        context_token = request_dialogs.set(working["dialogs"])
         try:
             event = Update.model_validate(update, context={"bot": bot})
-            await dispatcher.feed_update(bot, event, stats_store=PostgresStats(conn, bot.id))
+            await dispatcher.feed_update(bot, event, stats_store=EventStats(working["events"]))
+        except Exception:
+            with suppress(Exception):
+                await store.save({**saved, "lease_until": 0}, lease_etag)
+            raise
         finally:
-            request_connection.reset(context_token)
+            request_dialogs.reset(context_token)
+
+        working["updates"][update_id] = time()
+        await store.save(working, lease_etag)
 
 
 class handler(BaseHTTPRequestHandler):
@@ -41,8 +64,8 @@ class handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         secret = os.getenv("WEBHOOK_SECRET")
-        dsn = os.getenv("DATABASE_URL")
-        if not (TOKEN and secret and dsn):
+        blob_token = os.getenv("BLOB_READ_WRITE_TOKEN")
+        if not (TOKEN and secret and blob_token):
             self.respond(503, "Webhook is not configured")
             return
 
@@ -63,7 +86,10 @@ class handler(BaseHTTPRequestHandler):
             return
 
         try:
-            asyncio.run(process_update(dsn, update), loop_factory=asyncio.SelectorEventLoop)
+            asyncio.run(process_update(blob_token, update))
+        except BlobConflict:
+            self.respond(503, "Update in progress")
+            return
         except Exception as exc:
             logger.error("Telegram update %d failed (%s)", update["update_id"], type(exc).__name__)
             self.respond(500, "Update failed")

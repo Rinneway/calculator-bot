@@ -8,6 +8,7 @@ import asyncio
 import logging
 import os
 from datetime import date, datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Dispatcher, F, Router
@@ -24,7 +25,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 import branding
 from calc import make_plan, parse_days, parse_money, render_plan
-from storage import SQLiteStats, StatsStore
+from storage import EventStats, read_events
 
 try:  # .env рядом с ботом (необязательно)
     from dotenv import load_dotenv
@@ -35,7 +36,7 @@ except ImportError:
 TOKEN = os.getenv("BOT_TOKEN", "")
 SURVEY_URL = os.getenv("SURVEY_URL", "")
 ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "").replace(" ", "").split(",") if x}
-DB_PATH = os.getenv("DB_PATH", "stats.db")
+STATS_PATH = Path(os.getenv("STATS_PATH", "stats.json"))
 TIMEZONE = os.getenv("BOT_TIMEZONE") or ("Asia/Tomsk" if os.getenv("VERCEL") else None)
 
 router = Router()
@@ -90,7 +91,7 @@ START_TEXT = (
 
 
 @router.message(CommandStart())
-async def start(m: Message, state: FSMContext, stats_store: StatsStore):
+async def start(m: Message, state: FSMContext, stats_store: EventStats):
     await state.clear()
     await stats_store.log_event(m.from_user.id, "start")
     await m.answer(START_TEXT, reply_markup=kb([("Посчитать", "go")]))
@@ -169,7 +170,7 @@ async def got_mand(m: Message, state: FSMContext):
     await set_mandatory(m, state, v)
 
 
-async def finish(target: Message, state: FSMContext, stats_store: StatsStore, user_id: int, save: int):
+async def finish(target: Message, state: FSMContext, stats_store: EventStats, user_id: int, save: int):
     data = await state.get_data()
     today = today_in_bot_timezone()
     plan = make_plan(data["balance"], data["days"], data["mandatory"], save, today)
@@ -183,7 +184,7 @@ async def finish(target: Message, state: FSMContext, stats_store: StatsStore, us
 
 
 @router.callback_query(Calc.save, F.data.startswith("s:"))
-async def got_save_btn(c: CallbackQuery, state: FSMContext, stats_store: StatsStore):
+async def got_save_btn(c: CallbackQuery, state: FSMContext, stats_store: EventStats):
     data = await state.get_data()
     raw = c.data[2:]
     save = int(data["balance"] * int(raw[1:]) / 100) if raw.startswith("p") else int(raw)
@@ -192,7 +193,7 @@ async def got_save_btn(c: CallbackQuery, state: FSMContext, stats_store: StatsSt
 
 
 @router.message(Calc.save)
-async def got_save(m: Message, state: FSMContext, stats_store: StatsStore):
+async def got_save(m: Message, state: FSMContext, stats_store: EventStats):
     t = (m.text or "").strip()
     data = await state.get_data()
     if t.endswith("%") and t[:-1].strip().isdigit():
@@ -206,7 +207,7 @@ async def got_save(m: Message, state: FSMContext, stats_store: StatsStore):
 
 
 @router.callback_query(F.data == "want")
-async def want(c: CallbackQuery, stats_store: StatsStore):
+async def want(c: CallbackQuery, stats_store: EventStats):
     await stats_store.log_event(c.from_user.id, "want_card")
     await c.message.answer(
         "Спасибо! «Свой резерв» — пока концепт команды SND для кейс-чемпионата ВТБ, оформить карту нельзя. "
@@ -216,7 +217,7 @@ async def want(c: CallbackQuery, stats_store: StatsStore):
 
 
 @router.callback_query(F.data == "survey")
-async def survey(c: CallbackQuery, stats_store: StatsStore):
+async def survey(c: CallbackQuery, stats_store: EventStats):
     await stats_store.log_event(c.from_user.id, "survey")
     if SURVEY_URL:
         b = InlineKeyboardBuilder()
@@ -227,7 +228,7 @@ async def survey(c: CallbackQuery, stats_store: StatsStore):
     await answer_callback(c)
 
 
-async def stats(m: Message, stats_store: StatsStore):
+async def stats(m: Message, stats_store: EventStats):
     if m.from_user.id in ADMIN_IDS:
         await m.answer(stats_text(*await stats_store.summary()))
 
@@ -267,7 +268,8 @@ async def main():
     if not TOKEN:
         raise SystemExit("Нет BOT_TOKEN. Получите токен у @BotFather и запишите в .env")
     logging.basicConfig(level=logging.INFO)
-    dp = make_dispatcher(events_isolation=SimpleEventIsolation(), stats_store=SQLiteStats(DB_PATH))
+    events = read_events(STATS_PATH) if STATS_PATH.is_file() else []
+    dp = make_dispatcher(events_isolation=SimpleEventIsolation(), stats_store=EventStats(events, STATS_PATH))
     async with make_bot() as bot:
         await apply_branding(bot)
         await dp.start_polling(bot, close_bot_session=False)
